@@ -29,7 +29,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 OFFSETS_FILE = Path(__file__).parent / "offsets.json"
-PROCESS_NAME = "AoE2DE.exe"
+PROCESS_NAME = "AoE2DE_s.exe"
 POLL_INTERVAL = 3.0  # segundos
 
 AGE_NAMES = {0: "Dark", 1: "Feudal", 2: "Castle", 3: "Imperial"}

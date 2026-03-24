@@ -98,7 +98,8 @@ def calibrate() -> None:
         pm = pymem.Pymem(PROCESS_NAME)
     except pymem.exception.ProcessNotFound:
         logger.error(
-            "Processo '%s' não encontrado. Abra o AoE2DE antes de executar este script.",
+            "Processo '%s' não encontrado. Abra o AoE2DE antes de executar este script.\n"
+            "  Dica: verifique o nome real com: Get-Process | Select-Object Name",
             PROCESS_NAME,
         )
         sys.exit(1)
