@@ -1,0 +1,17 @@
+# AoE2Coach — dependências
+# Instale com: pip install -r requirements.txt
+# (Requer Python 3.10+ em Windows)
+
+# Leitura de memória de processos Windows
+pymem>=1.14.0
+
+# API da Anthropic (Claude)
+anthropic>=0.40.0
+
+# Registro de hotkeys globais
+keyboard>=0.13.5
+
+# Acesso à API Win32 (usado internamente pelo pymem e para alguns recursos do overlay)
+pywin32>=306
+
+# tkinter é built-in no Python — nenhum pacote adicional necessário

@@ -1,0 +1,31 @@
+{
+  "patch_version": "101.102.60.0",
+  "calibrated_at": "2026-03-24T00:00:00",
+  "signatures": {
+    "tc_count":         "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 8B 40",
+    "villager_count":   "89 ?? ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? 8B 48",
+    "food":             "F3 0F 10 05 ?? ?? ?? ?? F3 0F 58 C1 F3 0F 11 05",
+    "wood":             "F3 0F 10 0D ?? ?? ?? ?? F3 0F 58 C8 F3 0F 11 0D",
+    "gold":             "F3 0F 10 15 ?? ?? ?? ?? F3 0F 58 D1 F3 0F 11 15",
+    "stone":            "F3 0F 10 1D ?? ?? ?? ?? F3 0F 58 DA F3 0F 11 1D",
+    "game_time":        "48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 81 ?? ?? ?? ??",
+    "current_age":      "8B 05 ?? ?? ?? ?? 85 C0 74 ?? 83 F8 04",
+    "age_research":     "80 3D ?? ?? ?? ?? 00 75 ?? 48 8B 0D ?? ?? ?? ??",
+    "idle_tc":          "8B 15 ?? ?? ?? ?? 85 D2 74 ?? 83 FA 01",
+    "tc_queue":         "8B 4D ?? 85 C9 74 ?? 83 F9 01 74"
+  },
+  "offsets": {
+    "tc_count":         "0x00000000",
+    "villager_count":   "0x00000000",
+    "food":             "0x00000000",
+    "wood":             "0x00000000",
+    "gold":             "0x00000000",
+    "stone":            "0x00000000",
+    "game_time":        "0x00000000",
+    "current_age":      "0x00000000",
+    "age_research":     "0x00000000",
+    "idle_tc":          "0x00000000",
+    "tc_queue":         "0x00000000"
+  },
+  "_note": "Offsets start as 0x0 — run calibrate.py after each patch to resolve them."
+}
