@@ -231,9 +231,13 @@ class MemoryReader:
             data = json.loads(OFFSETS_FILE.read_text(encoding="utf-8"))
             self._sigs        = data.get("signatures", {})
             self._offsets_raw = data.get("offsets", {})
+            # Campos marcados como "direct" foram obtidos via Cheat Engine —
+            # endereço final já conhecido, sem necessidade de RIP-relative.
+            self._direct: set[str] = set(data.get("direct", []))
             logger.info("Offsets carregados (patch %s)", data.get("patch_version", "?"))
         except FileNotFoundError:
             logger.warning("offsets.json não encontrado — calibração necessária.")
+            self._direct: set[str] = set()
 
     def _resolve_addresses(self) -> None:
         """
@@ -246,11 +250,20 @@ class MemoryReader:
 
         for name, sig_str in self._sigs.items():
             saved = int(self._offsets_raw.get(name, "0x0"), 16)
+
             if saved != 0:
+                # Endereço direto (Cheat Engine) — usa sem qualquer resolução
+                if name in self._direct:
+                    self._resolved[name] = saved
+                    logger.debug("%-20s → 0x%X (direto)", name, saved)
+                    continue
+
+                # Endereço resolvido pelo calibrate — usa direto também
                 self._resolved[name] = saved
-                logger.debug("%-20s → 0x%X (do offsets.json)", name, saved)
+                logger.debug("%-20s → 0x%X (calibrado)", name, saved)
                 continue
 
+            # Nenhum endereço salvo — tenta signature scanning
             pattern = _parse_signature(sig_str)
             mask    = _build_mask(sig_str)
             addr    = _scan_pattern(self._pm, pattern, mask,

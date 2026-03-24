@@ -27,5 +27,6 @@
     "idle_tc":          "0x7ff7f8beac40",
     "tc_queue":         "0x00000000"
   },
-  "_note": "Offsets start as 0x0 — run calibrate.py after each patch to resolve them."
+  "direct": ["food", "wood", "gold", "stone"],
+  "_note": "Endereços em 'direct' foram obtidos via Cheat Engine e são usados sem resolução RIP-relative. Os demais foram resolvidos via signature scanning pelo calibrate.py."
 }

@@ -86,6 +86,7 @@ def calibrate() -> None:
         sys.exit(1)
 
     signatures: dict[str, str] = data.get("signatures", {})
+    direct_fields: set[str]   = set(data.get("direct", []))
     if not signatures:
         logger.error("Nenhuma signature encontrada em offsets.json")
         sys.exit(1)
@@ -118,7 +119,17 @@ def calibrate() -> None:
     found: list[str] = []
 
     total = len(signatures)
+    # Preserva endereços diretos (Cheat Engine) — não tenta rescanear
+    existing_offsets: dict[str, str] = data.get("offsets", {})
+    for name in direct_fields:
+        if int(existing_offsets.get(name, "0x0"), 16) != 0:
+            new_offsets[name] = existing_offsets[name]
+            found.append(name)
+            logger.info("  ✓ Preservado (direto): %-20s → %s", name, existing_offsets[name])
+
     for idx, (name, sig_str) in enumerate(signatures.items(), 1):
+        if name in direct_fields:
+            continue  # já preservado acima
         logger.info("[%d/%d] Procurando: %-20s  sig: %s", idx, total, name, sig_str)
 
         pattern = _parse_signature(sig_str)
