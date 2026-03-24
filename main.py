@@ -1,15 +1,17 @@
 """
 main.py — Entry point do AoE2Coach.
 
-Inicializa o MemoryReader, o AoE2Coach e o Overlay, conectando-os
-de forma que:
+Inicializa o MemoryReader, o AoE2Coach, o AutoVillager e o Overlay,
+conectando-os de forma que:
   - O MemoryReader faz polling a cada 3 s e notifica quando o estado muda.
-  - O AoE2Coach é chamado na mesma thread de background para gerar a dica.
+  - O AoE2Coach é chamado em background para gerar dicas via IA.
+  - O AutoVillager enfileira aldeões em TCs ociosos via PostMessage.
   - O Overlay é atualizado via fila thread-safe.
   - O loop tkinter roda na thread principal.
 
 Uso:
     python main.py [--hotkey KEY] [--no-coach]
+                   [--auto-vill] [--idle-tc-key KEY] [--vill-key KEY]
 
 Variáveis de ambiente:
     ANTHROPIC_API_KEY   Obrigatória para o coach (pode ser omitida com --no-coach).
@@ -27,6 +29,7 @@ import time
 from memory_reader import MemoryReader, GameState
 from coach import AoE2Coach
 from overlay import Overlay
+from automator import AutoVillager
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -67,6 +70,27 @@ def parse_args() -> argparse.Namespace:
         help="Intervalo de polling em segundos (padrão: 3.0)",
     )
     parser.add_argument(
+        "--auto-vill",
+        action="store_true",
+        help="Ativa produção automática de aldeões em TCs ociosos",
+    )
+    parser.add_argument(
+        "--idle-tc-key",
+        default="Home",
+        help="Tecla configurada no jogo para 'Ir ao próximo TC ocioso' (padrão: Home)",
+    )
+    parser.add_argument(
+        "--vill-key",
+        default="A",
+        help="Tecla de produção de aldeão no seu layout (padrão: A)",
+    )
+    parser.add_argument(
+        "--vill-cooldown",
+        type=float,
+        default=4.0,
+        help="Segundos de espera entre rodadas do AutoVillager (padrão: 4.0)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Habilita logs de depuração",
@@ -84,7 +108,20 @@ class AoE2CoachApp:
         self.overlay = Overlay(hotkey=args.hotkey)
         self.coach: AoE2Coach | None = None
         self.reader: MemoryReader | None = None
+        self.auto_villager: AutoVillager | None = None
         self._coach_lock = threading.Lock()  # evita chamadas simultâneas à API
+
+        # Inicializa o AutoVillager (se habilitado)
+        if args.auto_vill:
+            self.auto_villager = AutoVillager(
+                idle_tc_key=args.idle_tc_key,
+                vill_key=args.vill_key,
+                cooldown=args.vill_cooldown,
+            )
+            logger.info(
+                "AutoVillager ativo — TC ocioso: '%s' | Aldeão: '%s' | cooldown: %.1fs",
+                args.idle_tc_key, args.vill_key, args.vill_cooldown,
+            )
 
         # Inicializa o coach (se habilitado)
         if not args.no_coach:
@@ -118,6 +155,15 @@ class AoE2CoachApp:
             stone      = int(state.stone),
             connected  = True,
         )
+
+        # AutoVillager: enfileira aldeões em TCs ociosos
+        if self.auto_villager and state.idle_tc > 0 and state.tc_queue == 0:
+            threading.Thread(
+                target=self.auto_villager.try_queue,
+                args=(state.idle_tc,),
+                name="AutoVillager",
+                daemon=True,
+            ).start()
 
         # Solicita dica ao coach (não bloqueante; ignora se já estiver rodando)
         if self.coach is None:

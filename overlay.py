@@ -110,6 +110,10 @@ class Overlay:
         """Agenda nova dica da IA. Chamável de qualquer thread."""
         self._queue.put(_TipEvent(tip=tip))
 
+    def enqueue_autovill(self, message: str) -> None:
+        """Atualiza o status do AutoVillager. Chamável de qualquer thread."""
+        self._queue.put(_StatusEvent(message=f"🤖 {message}"))
+
     def enqueue_status(self, message: str) -> None:
         """Agenda mensagem de status. Chamável de qualquer thread."""
         self._queue.put(_StatusEvent(message=message))
@@ -201,6 +205,14 @@ class Overlay:
                      fg=TEXT_COLOR, bg=BG_COLOR, width=6, anchor="w").pack(side=col, padx=(0, 6))
 
         tk.Frame(inner, bg=BORDER_COLOR, height=1).pack(fill=tk.X, pady=(6, 4))
+
+        # ── AutoVillager status ──────────────────────────────────────
+        self._autovill_var = self._mkvar("autovill_status", "")
+        self._autovill_label = tk.Label(
+            inner, textvariable=self._autovill_var,
+            font=FONT_SMALL, fg="#00FF88", bg=BG_COLOR, anchor="w",
+        )
+        self._autovill_label.pack(fill=tk.X)
 
         # ── Dica da IA ───────────────────────────────────────────────
         tk.Label(inner, text="💡 Dica do Coach:", font=FONT_SMALL,
