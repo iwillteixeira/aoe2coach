@@ -15,16 +15,16 @@
     "tc_queue":         "8B 4D ?? 85 C9 74 ?? 83 F9 01 74"
   },
   "offsets": {
-    "tc_count":         "0x00000000",
-    "villager_count":   "0x00000000",
-    "food":             "0x00000000",
-    "wood":             "0x00000000",
-    "gold":             "0x00000000",
-    "stone":            "0x00000000",
+    "tc_count":         "0x7ff7f82c8238",
+    "villager_count":   "0x7ff83dcd45b6",
+    "food":             "0x19E6F589E4C",
+    "wood":             "0x19E6F58920C",
+    "gold":             "0x19E6F58A00C",
+    "stone":            "0x19E6F589B8C",
     "game_time":        "0x00000000",
     "current_age":      "0x00000000",
-    "age_research":     "0x00000000",
-    "idle_tc":          "0x00000000",
+    "age_research":     "0x7ff7f81f4510",
+    "idle_tc":          "0x7ff7f8beac40",
     "tc_queue":         "0x00000000"
   },
   "_note": "Offsets start as 0x0 — run calibrate.py after each patch to resolve them."
