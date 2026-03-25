@@ -270,8 +270,49 @@ def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label
 
     resolved = base + new_rva
     ptr = rptr(pm, resolved)
+    if ptr is None:
+        print(f"  {label}: new_rva=0x{new_rva:X}  ptr=inválido")
+        return None, None
     print(f"  {label}: new_rva=0x{new_rva:X}  ptr=0x{ptr:X}")
     return resolved, ptr
+
+
+# ---------------------------------------------------------------------------
+# Busca por força bruta do offset Player* dentro de TribePanelInven
+# ---------------------------------------------------------------------------
+
+def probe_localplayer_offset(pm, tribe_ptr,
+                              off_start=0x100, off_end=0x600, step=8):
+    """
+    Varre offsets alinhados em 8 bytes dentro de tribe_ptr procurando um
+    ponteiro que pareça um Player* válido:
+      candidate = *(tribe_ptr + off)   → ponteiro válido
+      p_res     = *(candidate + 0x70)  → ponteiro válido (Resources*)
+      food      =  *(p_res + 0x00)     → float 0..100000
+      wood      =  *(p_res + 0x04)     → float 0..100000
+    Retorna (offset, player_ptr) ou (None, None).
+    """
+    def sane_resource(v):
+        return v is not None and 0.0 <= v <= 100000.0
+
+    print(f"  Sondando offsets 0x{off_start:X}..0x{off_end:X} em TribePanelInven "
+          f"procurando Player*...", flush=True)
+
+    for off in range(off_start, off_end, step):
+        candidate = rptr(pm, tribe_ptr + off)
+        if candidate is None:
+            continue
+        p_res = rptr(pm, candidate + OFF_PLAYER_RESOURCES)
+        if p_res is None:
+            continue
+        food = rfloat(pm, p_res + OFF_RES_FOOD)
+        wood = rfloat(pm, p_res + OFF_RES_WOOD)
+        if sane_resource(food) and sane_resource(wood):
+            print(f"  Encontrado: TribePanelInven + 0x{off:X} → Player*=0x{candidate:X} "
+                  f"(food={food:.0f} wood={wood:.0f})")
+            return off, candidate
+
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -324,18 +365,25 @@ def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None):
     p_player = rptr(pm, tribe_ptr + off)
     if p_player is None:
         print(f"  TribePanelInven + 0x{off:X}: ponteiro inválido — escaneando offset correto...")
+        # Tenta AOB para o offset literal
         results = aob_scan_all(pm, base,
             [("TribePanelInven_localPlayer", AOB_LOCALPLAYER_OFF, 3, 4, "bytes")])
-        # resultado é valor literal (bytes), não RVA
         new_off = results.get("TribePanelInven_localPlayer")
-        if new_off is None:
-            print("  Offset do jogador local não encontrado.")
-            return None
-        save_rva("TribePanelInven_localPlayer", new_off, section="struct_offsets")
-        p_player = rptr(pm, tribe_ptr + new_off)
+
+        # Fallback: sonda força bruta
+        if not new_off:
+            new_off, p_player = probe_localplayer_offset(pm, tribe_ptr)
+            if new_off is None:
+                print("  Offset do jogador local não encontrado.")
+                return None
+        else:
+            p_player = rptr(pm, tribe_ptr + new_off)
+
         if p_player is None:
-            print(f"  TribePanelInven + 0x{new_off:X}: ainda inválido.")
+            print(f"  TribePanelInven + 0x{new_off:X}: ponteiro inválido.")
             return None
+
+        save_rva("TribePanelInven_localPlayer", new_off, section="struct_offsets")
         off = new_off
 
     print(f"  Player* (local) = 0x{p_player:X}")
