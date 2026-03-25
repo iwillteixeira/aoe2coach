@@ -282,69 +282,75 @@ def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label
 # ---------------------------------------------------------------------------
 
 def probe_localplayer_offset(pm, tribe_ptr,
-                              off_start=0x100, off_end=0x600, step=8,
+                              off_start=0x000, off_end=0x800, step=8,
                               food_hint=None, tol=5.0):
     """
     Varre offsets dentro de tribe_ptr procurando Player* válido.
+    Para cada candidato Player*, testa múltiplos offsets possíveis de Resources*
+    (não assume 0x70 — tenta 0x40..0x180).
 
-    Critérios obrigatórios:
-      - candidate = *(tribe_ptr+off) é ponteiro válido
-      - *(candidate+0x70) é ponteiro válido (Resources*)
-      - food, wood, stone, gold estão em [0, 100000]
-      - age float está em {0.0, 1.0, 2.0, 3.0}
-
-    Se food_hint fornecido, exige |food - food_hint| <= tol.
-    Imprime todos os candidatos e retorna o melhor (ou o único).
+    Se food_hint fornecido, filtra pelo valor de food.
     """
     def sane(v):
         return v is not None and 0.0 <= v <= 100_000.0
 
-    print(f"  Sondando offsets 0x{off_start:X}..0x{off_end:X} em TribePanelInven "
-          f"procurando Player*...", flush=True)
+    # Offsets candidatos para Resources* dentro de Player*
+    res_offsets = list(range(0x40, 0x180, 8))
+
+    print(f"  Sondando offsets 0x{off_start:X}..0x{off_end:X} em TribePanelInven, "
+          f"testando {len(res_offsets)} offsets de Resources* por candidato...", flush=True)
 
     candidates = []
     for off in range(off_start, off_end, step):
         candidate = rptr(pm, tribe_ptr + off)
         if candidate is None:
             continue
-        p_res = rptr(pm, candidate + OFF_PLAYER_RESOURCES)
-        if p_res is None:
-            continue
-        food  = rfloat(pm, p_res + OFF_RES_FOOD)
-        wood  = rfloat(pm, p_res + OFF_RES_WOOD)
-        stone = rfloat(pm, p_res + OFF_RES_STONE)
-        gold  = rfloat(pm, p_res + OFF_RES_GOLD)
-        age   = rfloat(pm, p_res + OFF_RES_AGE)
 
-        if not (sane(food) and sane(wood) and sane(stone) and sane(gold)):
-            continue
-        if age is None or round(age) not in (0, 1, 2, 3):
-            continue
-        if food_hint is not None and abs(food - food_hint) > tol:
-            continue
+        for res_off in res_offsets:
+            p_res = rptr(pm, candidate + res_off)
+            if p_res is None:
+                continue
+            food  = rfloat(pm, p_res + OFF_RES_FOOD)
+            wood  = rfloat(pm, p_res + OFF_RES_WOOD)
+            stone = rfloat(pm, p_res + OFF_RES_STONE)
+            gold  = rfloat(pm, p_res + OFF_RES_GOLD)
+            age   = rfloat(pm, p_res + OFF_RES_AGE)
 
-        candidates.append((off, candidate, food, wood, stone, gold, age))
-        print(f"  Candidato +0x{off:X} → 0x{candidate:X}  "
-              f"food={food:.0f} wood={wood:.0f} stone={stone:.0f} "
-              f"gold={gold:.0f} age={int(round(age))}")
+            if not (sane(food) and sane(wood) and sane(stone) and sane(gold)):
+                continue
+            if age is None or round(age) not in (0, 1, 2, 3):
+                continue
+            if food_hint is not None and abs(food - food_hint) > tol:
+                continue
+
+            candidates.append((off, res_off, candidate, p_res, food, wood, stone, gold, age))
+            print(f"  Candidato Player*+0x{off:X}  Resources*+0x{res_off:X}  "
+                  f"food={food:.0f} wood={wood:.0f} stone={stone:.0f} "
+                  f"gold={gold:.0f} age={int(round(age))}")
 
     if not candidates:
         if food_hint is not None:
-            print(f"  Nenhum candidato com food≈{food_hint:.0f}. "
-                  f"Rode sem --food-hint para ver todos.")
+            print(f"  Nenhum candidato com food≈{food_hint:.0f}.")
+            print(f"  Dica: rode sem --food-hint para listar todos, "
+                  f"ou aumente o range com --probe-end 0xC00")
         else:
             print("  Nenhum candidato encontrado.")
         return None, None
 
-    if len(candidates) == 1:
-        off, ptr, *_ = candidates[0]
-        return off, ptr
+    # Prefere candidato com food mais próximo do hint (ou maior food)
+    if food_hint is not None:
+        best = min(candidates, key=lambda c: abs(c[4] - food_hint))
+    else:
+        best = max(candidates, key=lambda c: c[4])
 
-    # Mais de um candidato — prefere o que tiver food > 10 (mais provável ser real)
-    best = max(candidates, key=lambda c: c[2])
-    off, ptr, food, *_ = best
-    print(f"  → Múltiplos candidatos: usando +0x{off:X} (food={food:.0f}). "
-          f"Use --food-hint=<valor> para forçar outro.")
+    off, res_off, ptr, p_res, food, *_ = best
+
+    if res_off != OFF_PLAYER_RESOURCES:
+        print(f"\n  *** ATENÇÃO: Resources* está em Player+0x{res_off:X} "
+              f"(SDK dizia 0x{OFF_PLAYER_RESOURCES:X}) ***")
+        print(f"  Salvando novo offset de Resources* em offsets.json...")
+        save_rva("Player_Resources", res_off, section="struct_offsets")
+
     return off, ptr
 
 
@@ -500,13 +506,18 @@ def _load_saved_rvas():
         pf  = int(rvas["pathfindingSystem"], 16) if "pathfindingSystem" in rvas else PATHFINDING_RVA
         lp  = int(offs["TribePanelInven_localPlayer"], 16) \
               if "TribePanelInven_localPlayer" in offs else OFF_TRIBEPANEL_LOCALPLAYER
-        return tp, pf, lp
+        pr  = int(offs["Player_Resources"], 16) \
+              if "Player_Resources" in offs else OFF_PLAYER_RESOURCES
+        return tp, pf, lp, pr
     except Exception:
-        return TRIBEPANEL_RVA, PATHFINDING_RVA, OFF_TRIBEPANEL_LOCALPLAYER
+        return TRIBEPANEL_RVA, PATHFINDING_RVA, OFF_TRIBEPANEL_LOCALPLAYER, OFF_PLAYER_RESOURCES
 
 
 def main():
-    saved_tp, saved_pf, saved_lp = _load_saved_rvas()
+    saved_tp, saved_pf, saved_lp, saved_pr = _load_saved_rvas()
+    # Aplica offset de Resources* descoberto dinamicamente
+    global OFF_PLAYER_RESOURCES
+    OFF_PLAYER_RESOURCES = saved_pr
 
     ap = argparse.ArgumentParser(
         description="Lê recursos AoE2DE via cadeia de ponteiros do SDK.")
