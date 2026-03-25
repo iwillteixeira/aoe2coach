@@ -1,23 +1,20 @@
 """
 pointer_scan.py — Busca cadeia de ponteiros estável para endereços dinâmicos.
 
+Varre a memória nível a nível (sem carregar tudo na RAM) usando busca binária.
+Cada nível faz uma passagem completa pela memória do processo.
+
 Uso:
-    python pointer_scan.py 0x147B883257C
-    python pointer_scan.py 0x147B883257C --level 5 --offset 2048 --top 10
-
-O script lê toda a memória do processo, constrói um mapa reverso de ponteiros
-e faz BFS de volta do endereço alvo até encontrar cadeias que começam em
-endereços estáticos do módulo (AoE2DE_s.exe+OFFSET).
-
-Essas cadeias funcionam em qualquer sessão do jogo.
+    python pointer_scan.py 0x1513E7C91CC
+    python pointer_scan.py 0x1513E7C91CC --level 5 --offset 1024 --top 10
 """
 
 import argparse
+import bisect
 import struct
 import sys
 import ctypes
 from ctypes import wintypes
-from collections import defaultdict
 
 try:
     import pymem
@@ -31,10 +28,11 @@ PTR_MIN    = 0x10000
 PTR_MAX    = 0x7FFFFFFFFFFF
 MEM_COMMIT = 0x1000
 PAGE_READ  = 0x02 | 0x04 | 0x20 | 0x40 | 0x80
+MAX_PER_LEVEL = 3000   # limite de endereços rastreados por nível
 
 
 # ---------------------------------------------------------------------------
-# Enumeração de regiões
+# Regiões de memória
 # ---------------------------------------------------------------------------
 
 class _MBI(ctypes.Structure):
@@ -49,14 +47,10 @@ class _MBI(ctypes.Structure):
     ]
 
 
-def _get_regions(pm):
-    """Yields (base, size, is_static) para regiões legíveis e commitadas."""
+def _get_regions(pm, mod_base, mod_end):
     k32  = ctypes.WinDLL("kernel32")
     mbi  = _MBI()
     addr = 0
-    mod_base = pm.base_address
-    mod_end  = mod_base + 0x4000000   # ~64 MB a partir da base do módulo
-
     while addr < PTR_MAX:
         if not k32.VirtualQueryEx(pm.process_handle, ctypes.c_void_p(addr),
                                   ctypes.byref(mbi), ctypes.sizeof(mbi)):
@@ -64,33 +58,24 @@ def _get_regions(pm):
         base = mbi.BaseAddress or 0
         size = mbi.RegionSize  or 0
         if mbi.State == MEM_COMMIT and mbi.Protect & PAGE_READ and size > 0:
-            yield base, size, (mod_base <= base < mod_end)
+            is_static = mod_base <= base < mod_end
+            yield base, size, is_static
         nxt = base + size
         addr = nxt if nxt > addr else addr + 0x1000
 
 
 # ---------------------------------------------------------------------------
-# Construção do mapa reverso de ponteiros
+# Scan de um nível
 # ---------------------------------------------------------------------------
 
-def _build_reverse_map(pm, verbose=True):
+def _scan_level(pm, regions, targets_sorted, max_offset):
     """
-    Lê toda a memória e constrói:
-      reverse_map[ptr_value_alinhado] = [(addr_que_contem_o_ptr, is_static), ...]
+    Uma passagem pela memória procurando ponteiros que apontem para
+    qualquer endereço em [t - max_offset, t] para qualquer t em targets_sorted.
 
-    ptr_value_alinhado = valor & ~0xF  (alinha em 16 bytes para lookup rápido)
+    Retorna: [(ptr_addr, target_apontado, offset, is_static)]
     """
-    reverse_map: dict[int, list] = defaultdict(list)
-    regions = list(_get_regions(pm))
-    total   = sum(s for _, s, _ in regions)
-
-    if verbose:
-        print(f"  Regiões encontradas: {len(regions)}")
-        print(f"  Total de memória a varrer: {total / 1024 / 1024:.1f} MB")
-        print("  Varrendo... ", end="", flush=True)
-
-    scanned = 0
-    dots_at = total // 20
+    results = []
 
     for base, size, is_static in regions:
         try:
@@ -100,83 +85,85 @@ def _build_reverse_map(pm, verbose=True):
 
         for i in range(0, len(chunk) - 7, 8):
             val = struct.unpack_from("<Q", chunk, i)[0]
-            if PTR_MIN <= val <= PTR_MAX:
-                reverse_map[val & ~0xF].append((base + i, is_static))
-
-        scanned += size
-        if verbose and scanned % dots_at < size:
-            print(".", end="", flush=True)
-
-    if verbose:
-        print(f" OK  ({len(reverse_map):,} ponteiros indexados)")
-
-    return reverse_map
-
-
-# ---------------------------------------------------------------------------
-# BFS reverso: do alvo até endereço estático
-# ---------------------------------------------------------------------------
-
-def _pointer_scan(reverse_map, target, max_level, max_offset, top_n, mod_base):
-    """
-    BFS do endereço alvo para trás, procurando cadeias que terminam
-    em um endereço estático do módulo.
-    """
-    # Cada item na fila: (endereço_atual, cadeia_acumulada)
-    # cadeia = lista de offsets [(ptr_addr, offset_aplicado), ...]
-    queue   = [(target, [])]
-    chains  = []
-    visited = set()
-
-    for level in range(max_level):
-        next_queue = []
-
-        for current_addr, chain in queue:
-            if current_addr in visited:
+            if not (PTR_MIN <= val <= PTR_MAX):
                 continue
-            visited.add(current_addr)
 
-            # Procura ponteiros que apontem para [current_addr - max_offset, current_addr]
-            for offset in range(0, max_offset + 1, 8):
-                key = (current_addr - offset) & ~0xF
-                for (ptr_addr, is_static) in reverse_map.get(key, []):
-                    actual_val = current_addr - offset
-                    # Confirma o offset real (o alinhamento pode ter arredondado)
-                    actual_offset = current_addr - actual_val
-                    if actual_offset < 0 or actual_offset > max_offset:
-                        continue
+            # Busca binária: existe algum target t tal que val <= t <= val+max_offset?
+            lo = bisect.bisect_left(targets_sorted,  val)
+            hi = bisect.bisect_right(targets_sorted, val + max_offset)
+            if lo < hi:
+                t      = targets_sorted[lo]
+                offset = t - val
+                results.append((base + i, t, offset, is_static))
 
-                    new_chain = chain + [(ptr_addr, actual_offset)]
+    return results
 
-                    if is_static:
-                        chains.append(new_chain)
-                        if len(chains) >= top_n * 3:
-                            return chains
-                    else:
-                        next_queue.append((ptr_addr, new_chain))
 
-        queue = next_queue
-        if not queue:
+# ---------------------------------------------------------------------------
+# BFS por níveis
+# ---------------------------------------------------------------------------
+
+def pointer_scan(pm, target, max_level, max_offset, top_n, mod_base):
+    mod_end = mod_base + 0x4000000   # ~64 MB de espaço do módulo
+
+    # Pré-carrega lista de regiões (apenas metadados, não os dados)
+    regions = list(_get_regions(pm, mod_base, mod_end))
+    total_mb = sum(s for _, s, _ in regions) / 1024 / 1024
+    print(f"  Regiões: {len(regions)}  |  Total: {total_mb:.0f} MB  |"
+          f"  ~{total_mb / 800:.0f}-{total_mb / 400:.0f}s por nível\n")
+
+    # current_targets: { addr → cadeia_até_aqui }
+    current_targets = {target: []}
+    static_chains   = []
+
+    for level in range(1, max_level + 1):
+        tlist = sorted(current_targets.keys())
+        print(f"  Nível {level}/{max_level}: {len(tlist)} alvo(s)...", end="", flush=True)
+
+        found = _scan_level(pm, regions, tlist, max_offset)
+        print(f" {len(found)} ponteiros encontrados")
+
+        next_targets: dict[int, list] = {}
+
+        for (ptr_addr, pointed_at, offset, is_static) in found:
+            parent_chain = current_targets.get(pointed_at, [])
+            new_chain    = [(ptr_addr, offset)] + parent_chain
+
+            if is_static:
+                static_chains.append(new_chain)
+                if len(static_chains) >= top_n * 2:
+                    return static_chains
+            else:
+                if ptr_addr not in next_targets:
+                    next_targets[ptr_addr] = new_chain
+
+        # Evita explosão combinatória: mantém os mais promissores
+        if len(next_targets) > MAX_PER_LEVEL:
+            items = sorted(next_targets.items(), key=lambda x: len(x[1]))
+            next_targets = dict(items[:MAX_PER_LEVEL])
+
+        current_targets = next_targets
+        if not current_targets:
+            print("  Sem mais endereços intermediários para seguir.")
             break
 
-    return chains
+    return static_chains
 
 
 # ---------------------------------------------------------------------------
 # Formatação
 # ---------------------------------------------------------------------------
 
-def _fmt_chain(chain, mod_base, mod_name="AoE2DE_s.exe"):
+def _fmt(chain, mod_base):
     if not chain:
         return "(vazio)"
-    # Primeiro elemento: endereço estático → base offset
-    base_addr, first_offset = chain[0]
-    base_str = f"{mod_name}+0x{base_addr - mod_base:X}"
-    # Demais: offsets intermediários
-    steps = " -> ".join(f"+0x{off:X}" for _, off in chain[1:])
-    if steps:
-        return f"{base_str} -> {steps} -> +0x{first_offset:X}"
-    return f"{base_str} -> +0x{first_offset:X}"
+    base_addr, last_offset = chain[0], chain[0][1]
+    # chain[0] = (static_ptr_addr, offset_para_nivel_seguinte)
+    static_addr = chain[0][0]
+    rva         = static_addr - mod_base
+    steps       = [f"+0x{off:X}" for _, off in chain[1:]]
+    steps.append(f"+0x{chain[0][1]:X}")
+    return f"AoE2DE_s.exe+0x{rva:X}  ->  " + "  ->  ".join(steps)
 
 
 # ---------------------------------------------------------------------------
@@ -184,55 +171,45 @@ def _fmt_chain(chain, mod_base, mod_name="AoE2DE_s.exe"):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Pointer chain scanner para AoE2DE")
-    parser.add_argument("address", help="Endereço alvo em hex, ex: 0x147B883257C")
-    parser.add_argument("--level",  type=int, default=5,    help="Profundidade máxima (padrão: 5)")
-    parser.add_argument("--offset", type=int, default=2048, help="Offset máximo por nível (padrão: 2048)")
-    parser.add_argument("--top",    type=int, default=10,   help="Número de cadeias a exibir (padrão: 10)")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("address",         help="Endereço alvo (hex), ex: 0x1513E7C91CC")
+    ap.add_argument("--level",  type=int, default=5,    help="Profundidade máxima (padrão 5)")
+    ap.add_argument("--offset", type=int, default=1024, help="Offset máximo por nível (padrão 1024)")
+    ap.add_argument("--top",    type=int, default=10,   help="Cadeias a exibir (padrão 10)")
+    args = ap.parse_args()
 
     target = int(args.address, 16)
 
     print(f"\n{'='*60}")
-    print(f"  AoE2DE Pointer Scanner")
+    print(f"  AoE2DE Pointer Scanner  —  nível a nível (baixo RAM)")
     print(f"{'='*60}")
     print(f"  Alvo    : 0x{target:X}")
-    print(f"  Nível   : {args.level}")
-    print(f"  Offset  : {args.offset}")
+    print(f"  Níveis  : {args.level}   Offset máx: {args.offset}")
     print()
 
-    # Conecta ao processo
     try:
         pm = pymem.Pymem(PROCESS)
-        print(f"  Processo: {PROCESS}  (PID {pm.process_id})")
-        print(f"  Base    : 0x{pm.base_address:X}")
+        print(f"  Processo: PID {pm.process_id}  |  Base: 0x{pm.base_address:X}")
     except pymem.exception.ProcessNotFound:
-        print(f"ERRO: Processo '{PROCESS}' não encontrado. Abra o jogo.")
+        print(f"ERRO: '{PROCESS}' não encontrado.")
         sys.exit(1)
 
     print()
-    reverse_map = _build_reverse_map(pm, verbose=True)
-
-    print("\n  Buscando cadeias...", end="", flush=True)
-    chains = _pointer_scan(reverse_map, target, args.level, args.offset,
-                           args.top, pm.base_address)
-    print(f" {len(chains)} encontradas")
-
-    if not chains:
-        print("\n  Nenhuma cadeia encontrada.")
-        print("  Tente aumentar --level ou --offset.")
-        sys.exit(0)
-
-    # Ordena por menor número de níveis (cadeias mais curtas primeiro)
-    chains.sort(key=lambda c: len(c))
+    chains = pointer_scan(pm, target, args.level, args.offset,
+                          args.top, pm.base_address)
 
     print(f"\n{'='*60}")
-    print(f"  TOP {min(args.top, len(chains))} CADEIAS (mais curtas primeiro)")
-    print(f"{'='*60}")
-    for i, chain in enumerate(chains[:args.top], 1):
-        print(f"  {i:2d}. {_fmt_chain(chain, pm.base_address)}")
-
-    print(f"\n  Cole a melhor cadeia aqui para eu adicionar ao offsets.json.")
+    if not chains:
+        print("  Nenhuma cadeia estática encontrada.")
+        print("  Tente: --level 6  ou  --offset 2048")
+    else:
+        chains.sort(key=lambda c: len(c))
+        print(f"  {min(args.top, len(chains))} CADEIA(S) ENCONTRADA(S):")
+        print(f"{'='*60}")
+        for i, ch in enumerate(chains[:args.top], 1):
+            print(f"  {i:2d}. {_fmt(ch, pm.base_address)}")
+        print(f"\n  Cole a melhor cadeia aqui para eu adicionar ao offsets.json.")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
