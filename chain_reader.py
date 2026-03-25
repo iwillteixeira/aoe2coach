@@ -29,9 +29,11 @@ Uso:
 """
 
 import argparse
+import json
 import struct
 import sys
 import time
+from pathlib import Path
 
 try:
     import pymem
@@ -39,6 +41,8 @@ try:
 except ImportError:
     print("pip install pymem pywin32")
     sys.exit(1)
+
+OFFSETS_FILE = Path(__file__).parent / "offsets.json"
 
 PROCESS = "AoE2DE_s.exe"
 MASK64  = 0xFFFFFFFFFFFFFFFF
@@ -168,8 +172,21 @@ def resolve_rip(pm, instr_addr, field=3, instr_size=7):
         return None
 
 
-def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label=""):
-    """Tenta base+rva primeiro; se falhar, faz AOB scan para atualizar o RVA."""
+def save_rva(key, new_rva):
+    """Persiste novo RVA no offsets.json (seção _sdk_chain.static_rvas)."""
+    try:
+        data = json.loads(OFFSETS_FILE.read_text(encoding="utf-8"))
+        data.setdefault("_sdk_chain", {}).setdefault("static_rvas", {})[key] = hex(new_rva)
+        OFFSETS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                                encoding="utf-8")
+        print(f"  → offsets.json atualizado: {key} = 0x{new_rva:X}")
+    except Exception as e:
+        print(f"  → aviso: não foi possível salvar RVA em offsets.json: {e}")
+
+
+def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label="",
+                    offsets_key=None):
+    """Tenta base+rva primeiro; se falhar, faz AOB scan e salva o novo RVA."""
     static_addr = base + rva
     ptr = rptr(pm, static_addr)
     if ptr is not None:
@@ -188,6 +205,8 @@ def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label
     new_rva = resolved - base
     ptr = rptr(pm, resolved)
     print(f"encontrado  new_rva=0x{new_rva:X}  ptr=0x{ptr:X}")
+    if offsets_key:
+        save_rva(offsets_key, new_rva)
     return resolved, ptr
 
 
@@ -231,7 +250,8 @@ def chain_local_player(pm, base, tribepanel_rva):
     print("\n[Cadeia A] tribePanelInven → jogador local")
     static_addr, tribe_ptr = find_static_ptr(
         pm, base, tribepanel_rva, AOB_TRIBEPANEL,
-        aob_field=3, aob_instr_size=7, label="tribePanelInven"
+        aob_field=3, aob_instr_size=7, label="tribePanelInven",
+        offsets_key="tribePanelInven"
     )
     if tribe_ptr is None:
         return None
@@ -255,7 +275,8 @@ def chain_all_players(pm, base, pathfinding_rva):
     print("\n[Cadeia B] PathfindingSystem → World → PlayerArray → todos os jogadores")
     static_addr, pfs_ptr = find_static_ptr(
         pm, base, pathfinding_rva, AOB_PATHFINDING,
-        aob_field=3, aob_instr_size=7, label="pathfindingSystem"
+        aob_field=3, aob_instr_size=7, label="pathfindingSystem",
+        offsets_key="pathfindingSystem"
     )
     if pfs_ptr is None:
         return
@@ -296,17 +317,31 @@ def chain_all_players(pm, base, pathfinding_rva):
 # Main
 # ---------------------------------------------------------------------------
 
+def _load_saved_rvas():
+    """Carrega RVAs salvos do offsets.json; retorna (tribepanel_rva, pathfinding_rva)."""
+    try:
+        data = json.loads(OFFSETS_FILE.read_text(encoding="utf-8"))
+        rvas = data.get("_sdk_chain", {}).get("static_rvas", {})
+        tp  = int(rvas["tribePanelInven"],   16) if "tribePanelInven"   in rvas else TRIBEPANEL_RVA
+        pf  = int(rvas["pathfindingSystem"], 16) if "pathfindingSystem" in rvas else PATHFINDING_RVA
+        return tp, pf
+    except Exception:
+        return TRIBEPANEL_RVA, PATHFINDING_RVA
+
+
 def main():
+    saved_tp, saved_pf = _load_saved_rvas()
+
     ap = argparse.ArgumentParser(
         description="Lê recursos AoE2DE via cadeia de ponteiros do SDK.")
     ap.add_argument("--all-players", action="store_true",
                     help="Lista recursos de todos os jogadores (Cadeia B)")
     ap.add_argument("--tribepanel-rva", type=lambda x: int(x, 16),
-                    default=TRIBEPANEL_RVA,
-                    help=f"RVA do tribePanelInven (padrão: 0x{TRIBEPANEL_RVA:X})")
+                    default=saved_tp,
+                    help=f"RVA do tribePanelInven (padrão: 0x{saved_tp:X})")
     ap.add_argument("--pathfinding-rva", type=lambda x: int(x, 16),
-                    default=PATHFINDING_RVA,
-                    help=f"RVA do pathfindingSystem (padrão: 0x{PATHFINDING_RVA:X})")
+                    default=saved_pf,
+                    help=f"RVA do pathfindingSystem (padrão: 0x{saved_pf:X})")
     ap.add_argument("--loop", type=float, default=0,
                     help="Repete a leitura a cada N segundos (0 = uma vez)")
     args = ap.parse_args()
