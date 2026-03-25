@@ -1,6 +1,43 @@
 {
   "patch_version": "101.102.60.0",
   "calibrated_at": "2026-03-24T00:00:00",
+
+  "_sdk_chain": {
+    "_source": "simonsan/Age_of_Empires_II_Definitive-Edition-SDK",
+    "_note": "RVAs estáticos podem quebrar após patches; use as assinaturas AOB para re-escanear. Offsets de struct (Player, Resources) são estáveis.",
+    "static_rvas": {
+      "tribePanelInven":   "0x2BA7190",
+      "pathfindingSystem": "0x2BB80D0",
+      "pAVGame":           "0x2B98098",
+      "mainScreen":        "0x2BA5C48"
+    },
+    "aob_signatures": {
+      "tribePanelInven":   "48 8B 0D ?? ?? ?? ?? 48 85 C9 0F 84 ?? ?? ?? ?? 40",
+      "pathfindingSystem": "48 8D 0D ?? ?? ?? ?? 41 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 C0"
+    },
+    "struct_offsets": {
+      "TribePanelInven_localPlayer": "0x208",
+      "Player_Resources":            "0x070",
+      "Player_ObjectManager":        "0x028",
+      "Player_name":                 "0x9390",
+      "Player_diplomacy":            "0x0D0",
+      "PathfindingSystem_World":     "0x018",
+      "World_gameTime":              "0x080",
+      "World_Map":                   "0x0A0",
+      "World_PlayerArray":           "0x2A8",
+      "PlayerArray_entry_size":      "0x10",
+      "Resources_food":              "0x00",
+      "Resources_wood":              "0x04",
+      "Resources_stone":             "0x08",
+      "Resources_gold":              "0x0C",
+      "Resources_age":               "0x18",
+      "Resources_currentPop":        "0x2C",
+      "Resources_villagerCount":     "0x94",
+      "ObjectManager_units":         "0x08",
+      "ObjectManager_count":         "0x10"
+    }
+  },
+
   "signatures": {
     "tc_count":         "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ?? 8B 40",
     "villager_count":   "89 ?? ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? 8B 48",

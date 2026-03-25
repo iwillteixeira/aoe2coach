@@ -23,7 +23,14 @@ PROCESS     = "AoE2DE_s.exe"
 MASK64      = 0xFFFFFFFFFFFFFFFF
 PTR_MIN     = 0x10000
 PTR_MAX     = 0x7FFFFFFFFFFF
+
+# RVA encontrado manualmente via scan_resources.py (build anterior)
 DEFAULT_RVA = 0x041CD3A0
+# RVA do SDK (simonsan/Age_of_Empires_II_Definitive-Edition-SDK):
+#   tribePanelInven = 0x2BA7190  (seguir +0x208 → Player*)
+#   pathfindingSystem = 0x2BB80D0 (seguir +0x18 → World, +0x2A8 → PlayerArray)
+SDK_RVA_TRIBEPANEL  = 0x2BA7190
+SDK_RVA_PATHFINDING = 0x2BB80D0
 
 
 # ---------------------------------------------------------------------------
