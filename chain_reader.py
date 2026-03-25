@@ -318,7 +318,10 @@ def probe_localplayer_offset(pm, tribe_ptr,
 
             if not (sane(food) and sane(wood) and sane(stone) and sane(gold)):
                 continue
-            if age is None or round(age) not in (0, 1, 2, 3):
+            try:
+                if age is None or age != age or round(age) not in (0, 1, 2, 3):
+                    continue
+            except (ValueError, OverflowError):
                 continue
             if food_hint is not None and abs(food - food_hint) > tol:
                 continue
