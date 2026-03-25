@@ -20,10 +20,15 @@
  *   {"tribePanelInven": "0x2BA7190", "pathfindingSystem": "0x2BB80D0"}
  *   Campos não encontrados aparecem como null.
  *
- * Offset RIP-relative: por padrão assume field=3, instr_size=7
- * (instrução MOV RAX,[RIP+disp32] de 7 bytes com disp32 nos bytes 3-6).
- * Para sobrescrever: "label:padrão:field:instr_size"
- *   "pathfindingSystem:48 8D 0D ?? ?? ?? ?? 41 B8:3:7"
+ * Modos de resolução (após o padrão AOB):
+ *   rip:field:instr_size  — resolve RIP-relative disp32 (padrão: rip:3:7)
+ *     ex: "tribePanelInven:48 8B 0D ?? ?? ?? ??:rip:3:7"
+ *   bytes:field:size      — lê N bytes literais no offset field do match
+ *     ex: "localPlayerOff:48 8B 83 ?? ?? ?? ?? 48 8B 48 70:bytes:3:4"
+ *
+ * Saída JSON:
+ *   modo rip   → RVA relativo ao módulo (subtrai base)
+ *   modo bytes → valor literal lido (ex: offset de struct)
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -42,12 +47,15 @@
 // Estruturas
 // ---------------------------------------------------------------------------
 
+enum class ResolveMode { RIP, BYTES };
+
 struct Pattern {
     std::string          label;
     std::vector<uint8_t> bytes;
-    std::vector<uint8_t> mask;   // 0xFF = fixo, 0x00 = wildcard
-    int                  rip_field      = 3;
-    int                  rip_instr_size = 7;
+    std::vector<uint8_t> mask;      // 0xFF = fixo, 0x00 = wildcard
+    ResolveMode          mode       = ResolveMode::RIP;
+    int                  field      = 3;  // byte offset dentro do match
+    int                  param      = 7;  // RIP: instr_size  |  BYTES: nº de bytes a ler
 };
 
 // ---------------------------------------------------------------------------
@@ -56,12 +64,14 @@ struct Pattern {
 
 static Pattern parse_pattern(const std::string& label,
                               const std::string& sig,
-                              int rip_field = 3, int rip_instr_size = 7)
+                              ResolveMode mode = ResolveMode::RIP,
+                              int field = 3, int param = 7)
 {
     Pattern p;
-    p.label          = label;
-    p.rip_field      = rip_field;
-    p.rip_instr_size = rip_instr_size;
+    p.label = label;
+    p.mode  = mode;
+    p.field = field;
+    p.param = param;
 
     size_t i = 0;
     while (i < sig.size()) {
@@ -139,9 +149,10 @@ static int64_t scan_chunk(const uint8_t* data, size_t size,
 }
 
 // ---------------------------------------------------------------------------
-// Resolve disp32 RIP-relative
+// Resolução do resultado
 // ---------------------------------------------------------------------------
 
+// Modo RIP: resolve disp32 RIP-relative → endereço absoluto
 static uintptr_t resolve_rip(HANDLE proc, uintptr_t instr_addr,
                               int field, int instr_size)
 {
@@ -151,6 +162,19 @@ static uintptr_t resolve_rip(HANDLE proc, uintptr_t instr_addr,
                            &disp, sizeof(disp), &read_ok) || read_ok != 4)
         return 0;
     return instr_addr + (uintptr_t)instr_size + (intptr_t)disp;
+}
+
+// Modo BYTES: lê N bytes literais no offset field e retorna como uint64
+static uintptr_t resolve_bytes(HANDLE proc, uintptr_t match_addr,
+                                int field, int nbytes)
+{
+    if (nbytes < 1 || nbytes > 8) return 0;
+    uint64_t val = 0;
+    SIZE_T   read_ok = 0;
+    if (!ReadProcessMemory(proc, (LPCVOID)(match_addr + field),
+                           &val, (SIZE_T)nbytes, &read_ok) || (int)read_ok != nbytes)
+        return 0;
+    return (uintptr_t)val;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +191,9 @@ int main(int argc, char* argv[])
     }
 
     // Parse dos padrões
+    // Formato: "label:padrão AOB[:modo[:field[:param]]]"
+    //   modo "rip"   (padrão) → resolve RIP-relative; field=3, param=instr_size=7
+    //   modo "bytes"          → lê bytes literais;    field=3, param=nbytes=4
     std::vector<Pattern> patterns;
     for (int i = 2; i < argc; i++) {
         std::string arg(argv[i]);
@@ -176,32 +203,35 @@ int main(int argc, char* argv[])
         std::string label = arg.substr(0, c1);
         std::string rest  = arg.substr(c1 + 1);
 
-        // Separa padrão de rip_field:instr_size opcionais no final
-        // Formato do padrão: bytes hex; field e instr_size são inteiros após o último ':'
-        // Heurística: se os dois últimos tokens separados por ':' são inteiros curtos, usa-os
-        int rip_field = 3, rip_instr_size = 7;
-        size_t c2 = rest.rfind(':');
-        if (c2 != std::string::npos) {
-            std::string tail = rest.substr(c2 + 1);
-            char* end;
-            int v = (int)strtol(tail.c_str(), &end, 10);
-            if (*end == '\0' && tail.size() <= 3) {
-                // provável instr_size
-                rip_instr_size = v;
-                rest = rest.substr(0, c2);
-                size_t c3 = rest.rfind(':');
-                if (c3 != std::string::npos) {
-                    std::string tail2 = rest.substr(c3 + 1);
-                    int v2 = (int)strtol(tail2.c_str(), &end, 10);
-                    if (*end == '\0' && tail2.size() <= 3) {
-                        rip_field = v2;
-                        rest = rest.substr(0, c3);
-                    }
-                }
-            }
-        }
+        // Extrai tokens opcionais do final: modo, field, param
+        // Separados por ':'; o padrão AOB só contém hex e '?' e espaços
+        ResolveMode mode  = ResolveMode::RIP;
+        int field = 3, param = 7;
 
-        patterns.push_back(parse_pattern(label, rest, rip_field, rip_instr_size));
+        // Divide no último ':' repetidamente enquanto o token parece um número ou "rip"/"bytes"
+        auto pop_int = [&](int& out) -> bool {
+            size_t pos = rest.rfind(':');
+            if (pos == std::string::npos) return false;
+            std::string tok = rest.substr(pos + 1);
+            char* e; long v = strtol(tok.c_str(), &e, 10);
+            if (*e != '\0' || tok.empty() || tok.size() > 4) return false;
+            out = (int)v; rest = rest.substr(0, pos); return true;
+        };
+        auto pop_mode = [&]() -> bool {
+            size_t pos = rest.rfind(':');
+            if (pos == std::string::npos) return false;
+            std::string tok = rest.substr(pos + 1);
+            if (tok == "rip")   { mode = ResolveMode::RIP;   rest = rest.substr(0, pos); return true; }
+            if (tok == "bytes") { mode = ResolveMode::BYTES; rest = rest.substr(0, pos);
+                                  if (param == 7) { param = 4; } return true; }
+            return false;
+        };
+
+        pop_int(param);
+        pop_int(field);
+        pop_mode();
+
+        patterns.push_back(parse_pattern(label, rest, mode, field, param));
     }
 
     if (patterns.empty()) {
@@ -280,10 +310,12 @@ int main(int argc, char* argv[])
                                              p.bytes.data(), p.mask.data(),
                                              p.bytes.size());
                     if (hit >= 0) {
-                        uintptr_t instr = region_base + offset + (uintptr_t)hit;
-                        uintptr_t res   = resolve_rip(proc, instr,
-                                                      p.rip_field,
-                                                      p.rip_instr_size);
+                        uintptr_t match = region_base + offset + (uintptr_t)hit;
+                        uintptr_t res   = 0;
+                        if (p.mode == ResolveMode::RIP)
+                            res = resolve_rip(proc, match, p.field, p.param);
+                        else
+                            res = resolve_bytes(proc, match, p.field, p.param);
                         if (res) {
                             results[pi] = res;
                             --remaining;
@@ -303,14 +335,18 @@ int main(int argc, char* argv[])
     CloseHandle(proc);
 
     // Saída JSON
+    // modo rip   → RVA (results[i] - base)
+    // modo bytes → valor literal (results[i] já é o valor)
     printf("{");
     for (size_t i = 0; i < patterns.size(); i++) {
         if (i > 0) printf(", ");
-        if (results[i] && base) {
-            uintptr_t rva = results[i] - base;
+        if (results[i]) {
+            uintptr_t val = (patterns[i].mode == ResolveMode::RIP && base)
+                            ? results[i] - base
+                            : results[i];
             printf("\"%s\": \"0x%llX\"",
                    patterns[i].label.c_str(),
-                   (unsigned long long)rva);
+                   (unsigned long long)val);
         } else {
             printf("\"%s\": null", patterns[i].label.c_str());
         }

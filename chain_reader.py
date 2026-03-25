@@ -55,11 +55,13 @@ TRIBEPANEL_RVA   = 0x2BA7190   # tribePanelInven
 PATHFINDING_RVA  = 0x2BB80D0   # pathfindingSystem
 
 # Assinaturas AOB para re-escaneamento após patches (do SDK)
-AOB_TRIBEPANEL   = "48 8B 0D ?? ?? ?? ?? 48 85 C9 0F 84 ?? ?? ?? ?? 40"
-AOB_PATHFINDING  = "48 8D 0D ?? ?? ?? ?? 41 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 C0"
+AOB_TRIBEPANEL        = "48 8B 0D ?? ?? ?? ?? 48 85 C9 0F 84 ?? ?? ?? ?? 40"
+AOB_PATHFINDING       = "48 8D 0D ?? ?? ?? ?? 41 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 C0"
+# Offset do jogador local dentro de TribePanelInven (lido como bytes literais)
+AOB_LOCALPLAYER_OFF   = "48 8B 83 ?? ?? ?? ?? 48 8B 48 70 F3 0F 10"
 
-# Offsets de struct fixos (estáveis entre patches)
-OFF_TRIBEPANEL_LOCALPLAYER = 0x208   # TribePanelInven → Player*
+# Offsets de struct — carregados dinamicamente do offsets.json (fallback abaixo)
+OFF_TRIBEPANEL_LOCALPLAYER = 0x208   # TribePanelInven → Player* (pode variar por patch)
 OFF_PLAYER_RESOURCES       = 0x070   # Player → Resources*
 OFF_PATHFINDING_WORLD      = 0x018   # PathfindingSystem → World*
 OFF_WORLD_GAMETIME         = 0x080   # World → int32 game time
@@ -111,16 +113,19 @@ def rfloat(pm, addr):
 SCANNER_EXE = Path(__file__).parent / "scanner.exe"
 
 
-def _scanner_exe_scan(patterns: list[tuple[str, str, int, int]]) -> dict[str, int | None]:
+def _scanner_exe_scan(patterns) -> dict[str, int | None]:
     """
-    Chama scanner.exe com os padrões e retorna {label: rva_int | None}.
-    patterns: lista de (label, aob_str, rip_field, rip_instr_size)
+    Chama scanner.exe com os padrões e retorna {label: valor | None}.
+    patterns: lista de (label, aob_str, field, param, mode)
+      mode: "rip" (padrão) ou "bytes"
     """
     import subprocess
 
     args = [str(SCANNER_EXE), PROCESS]
-    for label, sig, field, instr_size in patterns:
-        args.append(f"{label}:{sig}:{field}:{instr_size}")
+    for entry in patterns:
+        label, sig, field, param = entry[:4]
+        mode = entry[4] if len(entry) > 4 else "rip"
+        args.append(f"{label}:{sig}:{mode}:{field}:{param}")
 
     try:
         out = subprocess.check_output(args, timeout=120, text=True)
@@ -195,56 +200,54 @@ def resolve_rip(pm, instr_addr, field=3, instr_size=7):
         return None
 
 
-def save_rva(key, new_rva):
-    """Persiste novo RVA no offsets.json (seção _sdk_chain.static_rvas)."""
+def save_rva(key, value, section="static_rvas"):
+    """Persiste valor no offsets.json (_sdk_chain.<section>)."""
     try:
         data = json.loads(OFFSETS_FILE.read_text(encoding="utf-8"))
-        data.setdefault("_sdk_chain", {}).setdefault("static_rvas", {})[key] = hex(new_rva)
+        data.setdefault("_sdk_chain", {}).setdefault(section, {})[key] = hex(value)
         OFFSETS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False),
                                 encoding="utf-8")
-        print(f"  → offsets.json atualizado: {key} = 0x{new_rva:X}")
+        print(f"  → offsets.json atualizado: [{section}] {key} = 0x{value:X}")
     except Exception as e:
-        print(f"  → aviso: não foi possível salvar RVA em offsets.json: {e}")
+        print(f"  → aviso: não foi possível salvar em offsets.json: {e}")
 
 
-def aob_scan_all(pm, base, patterns: list[tuple[str, str, int, int]]) -> dict[str, int]:
+def aob_scan_all(pm, base, patterns) -> dict[str, int]:
     """
     Escaneia múltiplos padrões em uma única passagem pela memória.
-    patterns: [(label, aob_str, rip_field, rip_instr_size), ...]
-    Retorna {label: rva} para os encontrados.
-
+    patterns: [(label, aob_str, field, param[, mode]), ...]
+      mode: "rip" (padrão) → retorna RVA  |  "bytes" → retorna valor literal
+    Retorna {label: valor} para os encontrados.
     Usa scanner.exe (C++, rápido) se disponível; caso contrário, Python puro.
     """
-    # Verifica quais RVAs já são válidos (sem scan)
-    needed = []
-    for label, sig, field, instr_size in patterns:
-        needed.append((label, sig, field, instr_size))
-
-    if not needed:
+    if not patterns:
         return {}
 
     if SCANNER_EXE.exists():
-        use = "scanner.exe (C++)"
-        results = _scanner_exe_scan(needed)
+        print(f"  AOB scan via scanner.exe (C++)")
+        results = _scanner_exe_scan(patterns)
     else:
-        use = "Python puro (compile scanner/ para acelerar)"
+        print(f"  AOB scan via Python puro (compile scanner/ para acelerar)")
         results = {}
 
     if not results:
-        # Fallback Python: ainda uma passagem por pattern (sem scanner.exe)
-        print(f"  AOB scan via {use}...")
-        for label, sig, field, instr_size in needed:
+        # Fallback Python — suporta apenas modo "rip" (resolve_rip)
+        for entry in patterns:
+            label, sig, field, param = entry[:4]
+            mode = entry[4] if len(entry) > 4 else "rip"
             hit = _aob_scan_python(pm, sig)
             if hit:
-                resolved = resolve_rip(pm, hit, field, instr_size)
-                if resolved:
-                    results[label] = resolved - base
-    else:
-        print(f"  AOB scan via {use}")
-
-    for label, rva in results.items():
-        if rva:
-            save_rva(label, rva)
+                if mode == "bytes":
+                    try:
+                        raw = pm.read_bytes(hit + field, param)
+                        val = int.from_bytes(raw, "little")
+                        results[label] = val
+                    except Exception:
+                        pass
+                else:
+                    resolved = resolve_rip(pm, hit, field, param)
+                    if resolved:
+                        results[label] = resolved - base
 
     return results
 
@@ -307,7 +310,7 @@ def print_resources(label, d):
 # Cadeia A: tribePanelInven → jogador local
 # ---------------------------------------------------------------------------
 
-def chain_local_player(pm, base, tribepanel_rva):
+def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None):
     print("\n[Cadeia A] tribePanelInven → jogador local")
     static_addr, tribe_ptr = find_static_ptr(
         pm, base, tribepanel_rva, AOB_TRIBEPANEL,
@@ -317,10 +320,23 @@ def chain_local_player(pm, base, tribepanel_rva):
     if tribe_ptr is None:
         return None
 
-    p_player = rptr(pm, tribe_ptr + OFF_TRIBEPANEL_LOCALPLAYER)
+    off = localplayer_off if localplayer_off is not None else OFF_TRIBEPANEL_LOCALPLAYER
+    p_player = rptr(pm, tribe_ptr + off)
     if p_player is None:
-        print(f"  TribePanelInven + 0x{OFF_TRIBEPANEL_LOCALPLAYER:X}: ponteiro inválido")
-        return None
+        print(f"  TribePanelInven + 0x{off:X}: ponteiro inválido — escaneando offset correto...")
+        results = aob_scan_all(pm, base,
+            [("TribePanelInven_localPlayer", AOB_LOCALPLAYER_OFF, 3, 4, "bytes")])
+        # resultado é valor literal (bytes), não RVA
+        new_off = results.get("TribePanelInven_localPlayer")
+        if new_off is None:
+            print("  Offset do jogador local não encontrado.")
+            return None
+        save_rva("TribePanelInven_localPlayer", new_off, section="struct_offsets")
+        p_player = rptr(pm, tribe_ptr + new_off)
+        if p_player is None:
+            print(f"  TribePanelInven + 0x{new_off:X}: ainda inválido.")
+            return None
+        off = new_off
 
     print(f"  Player* (local) = 0x{p_player:X}")
     res = read_resources(pm, p_player)
@@ -379,19 +395,23 @@ def chain_all_players(pm, base, pathfinding_rva):
 # ---------------------------------------------------------------------------
 
 def _load_saved_rvas():
-    """Carrega RVAs salvos do offsets.json; retorna (tribepanel_rva, pathfinding_rva)."""
+    """Carrega RVAs e offsets de struct salvos do offsets.json."""
     try:
-        data = json.loads(OFFSETS_FILE.read_text(encoding="utf-8"))
-        rvas = data.get("_sdk_chain", {}).get("static_rvas", {})
+        data  = json.loads(OFFSETS_FILE.read_text(encoding="utf-8"))
+        chain = data.get("_sdk_chain", {})
+        rvas  = chain.get("static_rvas", {})
+        offs  = chain.get("struct_offsets", {})
         tp  = int(rvas["tribePanelInven"],   16) if "tribePanelInven"   in rvas else TRIBEPANEL_RVA
         pf  = int(rvas["pathfindingSystem"], 16) if "pathfindingSystem" in rvas else PATHFINDING_RVA
-        return tp, pf
+        lp  = int(offs["TribePanelInven_localPlayer"], 16) \
+              if "TribePanelInven_localPlayer" in offs else OFF_TRIBEPANEL_LOCALPLAYER
+        return tp, pf, lp
     except Exception:
-        return TRIBEPANEL_RVA, PATHFINDING_RVA
+        return TRIBEPANEL_RVA, PATHFINDING_RVA, OFF_TRIBEPANEL_LOCALPLAYER
 
 
 def main():
-    saved_tp, saved_pf = _load_saved_rvas()
+    saved_tp, saved_pf, saved_lp = _load_saved_rvas()
 
     ap = argparse.ArgumentParser(
         description="Lê recursos AoE2DE via cadeia de ponteiros do SDK.")
@@ -436,7 +456,7 @@ def main():
         if "pathfindingSystem" in found: pf_rva = found["pathfindingSystem"]
 
     def run_once():
-        chain_local_player(pm, base, tp_rva)
+        chain_local_player(pm, base, tp_rva, localplayer_off=saved_lp)
         if args.all_players:
             chain_all_players(pm, base, pf_rva)
 
