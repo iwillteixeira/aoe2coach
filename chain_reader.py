@@ -394,16 +394,29 @@ def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None, food_hint
     if tribe_ptr is None:
         return None
 
+    def _needs_rescan(p_player, hint):
+        """Retorna True se o ponteiro é inválido ou se food não bate com o hint."""
+        if p_player is None:
+            return True
+        if hint is None:
+            return False
+        res = read_resources(pm, p_player)
+        if res is None:
+            return True
+        return abs(res["food"] - hint) > 5.0
+
     off = localplayer_off if localplayer_off is not None else OFF_TRIBEPANEL_LOCALPLAYER
     p_player = rptr(pm, tribe_ptr + off)
-    if p_player is None:
-        print(f"  TribePanelInven + 0x{off:X}: ponteiro inválido — escaneando offset correto...")
-        # Tenta AOB para o offset literal
+
+    if _needs_rescan(p_player, food_hint):
+        reason = "ponteiro inválido" if p_player is None else \
+                 f"food={rfloat(pm, rptr(pm, p_player+OFF_PLAYER_RESOURCES) or 0) or '?':.0f} ≠ hint {food_hint:.0f}"
+        print(f"  TribePanelInven + 0x{off:X}: {reason} — re-escaneando offset...")
+
         results = aob_scan_all(pm, base,
             [("TribePanelInven_localPlayer", AOB_LOCALPLAYER_OFF, 3, 4, "bytes")])
         new_off = results.get("TribePanelInven_localPlayer")
 
-        # Fallback: sonda força bruta
         if not new_off:
             new_off, p_player = probe_localplayer_offset(pm, tribe_ptr,
                                                           food_hint=food_hint)
