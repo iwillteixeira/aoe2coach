@@ -107,6 +107,75 @@ def rfloat(pm, addr):
 
 
 # ---------------------------------------------------------------------------
+# Scan direto por valor float32 na memória do processo
+# ---------------------------------------------------------------------------
+
+def direct_scan_resources(pm, food_hint, tol=2.0):
+    """
+    Escaneia toda a memória do processo procurando float32 ≈ food_hint.
+    Para cada hit, verifica se os floats vizinhos parecem wood/stone/gold.
+    Retorna lista de (food_addr, food, wood, stone, gold) ordenada por plausibilidade.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class MBI(ctypes.Structure):
+        _fields_ = [
+            ("BaseAddress",       ctypes.c_void_p),
+            ("AllocationBase",    ctypes.c_void_p),
+            ("AllocationProtect", wintypes.DWORD),
+            ("RegionSize",        ctypes.c_size_t),
+            ("State",             wintypes.DWORD),
+            ("Protect",           wintypes.DWORD),
+            ("Type",              wintypes.DWORD),
+        ]
+
+    MEM_COMMIT    = 0x1000
+    PAGE_READABLE = 0x02 | 0x04 | 0x20 | 0x40 | 0x80
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    target = struct.pack("<f", food_hint)
+    results = []
+    addr = 0
+
+    print(f"  Escaneando memória por food≈{food_hint:.0f}...", flush=True)
+
+    while addr < 0x7FFFFFFFFFFF:
+        mbi = MBI()
+        if not k32.VirtualQueryEx(pm.process_handle, ctypes.c_void_p(addr),
+                                  ctypes.byref(mbi), ctypes.sizeof(mbi)):
+            break
+        base = mbi.BaseAddress or 0
+        size = mbi.RegionSize or 0
+
+        if mbi.State == MEM_COMMIT and mbi.Protect & PAGE_READABLE and size >= 4:
+            try:
+                chunk = pm.read_bytes(base, size)
+                for i in range(0, len(chunk) - 15, 4):
+                    f = struct.unpack_from("<f", chunk, i)[0]
+                    if abs(f - food_hint) > tol or f != f:
+                        continue
+                    # Lê wood/stone/gold nos 4 bytes seguintes
+                    wood  = struct.unpack_from("<f", chunk, i +  4)[0] if i +  8 <= len(chunk) else None
+                    stone = struct.unpack_from("<f", chunk, i +  8)[0] if i + 12 <= len(chunk) else None
+                    gold  = struct.unpack_from("<f", chunk, i + 12)[0] if i + 16 <= len(chunk) else None
+                    if wood is None or stone is None or gold is None:
+                        continue
+                    if wood != wood or stone != stone or gold != gold:
+                        continue  # NaN
+                    if not (0 <= wood <= 100000 and 0 <= stone <= 100000 and 0 <= gold <= 100000):
+                        continue
+                    results.append((base + i, f, wood, stone, gold))
+            except Exception:
+                pass
+
+        end = base + size
+        addr = end if end > addr else addr + 0x1000
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # AOB scanning — usa scanner.exe (C++) se disponível, senão Python puro
 # ---------------------------------------------------------------------------
 
@@ -536,6 +605,8 @@ def main():
                     help="Repete a leitura a cada N segundos (0 = uma vez)")
     ap.add_argument("--food-hint", type=float, default=None,
                     help="Valor de food atual (visível no jogo) para filtrar candidatos")
+    ap.add_argument("--direct-scan", action="store_true",
+                    help="Escaneia memória diretamente pelo valor de --food-hint (requer --food-hint)")
     args = ap.parse_args()
 
     try:
@@ -567,6 +638,22 @@ def main():
         if "pathfindingSystem" in found: pf_rva = found["pathfindingSystem"]
 
     def run_once():
+        if args.direct_scan:
+            if args.food_hint is None:
+                print("--direct-scan requer --food-hint=<valor>")
+                return
+            hits = direct_scan_resources(pm, args.food_hint)
+            if not hits:
+                print("  Nenhum resultado encontrado.")
+                return
+            print(f"  {len(hits)} resultado(s):")
+            for addr, food, wood, stone, gold in hits[:20]:
+                print(f"    0x{addr:X}  food={food:.0f} wood={wood:.0f} "
+                      f"stone={stone:.0f} gold={gold:.0f}")
+            if len(hits) > 20:
+                print(f"    ... (+{len(hits)-20} mais)")
+            return
+
         chain_local_player(pm, base, tp_rva, localplayer_off=saved_lp,
                            food_hint=args.food_hint)
         if args.all_players:
