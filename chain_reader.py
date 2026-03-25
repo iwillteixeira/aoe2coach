@@ -105,8 +105,31 @@ def rfloat(pm, addr):
 
 
 # ---------------------------------------------------------------------------
-# AOB scanning para localizar RVAs após patches
+# AOB scanning — usa scanner.exe (C++) se disponível, senão Python puro
 # ---------------------------------------------------------------------------
+
+SCANNER_EXE = Path(__file__).parent / "scanner.exe"
+
+
+def _scanner_exe_scan(patterns: list[tuple[str, str, int, int]]) -> dict[str, int | None]:
+    """
+    Chama scanner.exe com os padrões e retorna {label: rva_int | None}.
+    patterns: lista de (label, aob_str, rip_field, rip_instr_size)
+    """
+    import subprocess
+
+    args = [str(SCANNER_EXE), PROCESS]
+    for label, sig, field, instr_size in patterns:
+        args.append(f"{label}:{sig}:{field}:{instr_size}")
+
+    try:
+        out = subprocess.check_output(args, timeout=120, text=True)
+        data = json.loads(out.strip())
+        return {k: int(v, 16) if v else None for k, v in data.items()}
+    except Exception as e:
+        print(f"  scanner.exe falhou ({e}) — usando scan Python como fallback")
+        return {}
+
 
 def _parse_aob(sig_str):
     pat  = bytes(int(b, 16) if b != "??" else 0 for b in sig_str.split())
@@ -114,8 +137,8 @@ def _parse_aob(sig_str):
     return pat, mask
 
 
-def aob_scan(pm, sig_str):
-    """Retorna o endereço da primeira ocorrência do padrão AOB no processo."""
+def _aob_scan_python(pm, sig_str):
+    """Scan AOB em Python puro (lento, fallback quando scanner.exe não existe)."""
     import ctypes
     from ctypes import wintypes
 
@@ -130,7 +153,7 @@ def aob_scan(pm, sig_str):
             ("Type",              wintypes.DWORD),
         ]
 
-    MEM_COMMIT   = 0x1000
+    MEM_COMMIT    = 0x1000
     PAGE_READABLE = 0x02 | 0x04 | 0x20 | 0x40 | 0x80
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -163,7 +186,7 @@ def aob_scan(pm, sig_str):
 
 
 def resolve_rip(pm, instr_addr, field=3, instr_size=7):
-    """Resolve disp32 RIP-relative: addr + field = disp32 → target = addr + instr_size + disp32."""
+    """Resolve disp32 RIP-relative."""
     try:
         raw = pm.read_bytes(instr_addr + field, 4)
         disp = struct.unpack("<i", raw)[0]
@@ -184,6 +207,48 @@ def save_rva(key, new_rva):
         print(f"  → aviso: não foi possível salvar RVA em offsets.json: {e}")
 
 
+def aob_scan_all(pm, base, patterns: list[tuple[str, str, int, int]]) -> dict[str, int]:
+    """
+    Escaneia múltiplos padrões em uma única passagem pela memória.
+    patterns: [(label, aob_str, rip_field, rip_instr_size), ...]
+    Retorna {label: rva} para os encontrados.
+
+    Usa scanner.exe (C++, rápido) se disponível; caso contrário, Python puro.
+    """
+    # Verifica quais RVAs já são válidos (sem scan)
+    needed = []
+    for label, sig, field, instr_size in patterns:
+        needed.append((label, sig, field, instr_size))
+
+    if not needed:
+        return {}
+
+    if SCANNER_EXE.exists():
+        use = "scanner.exe (C++)"
+        results = _scanner_exe_scan(needed)
+    else:
+        use = "Python puro (compile scanner/ para acelerar)"
+        results = {}
+
+    if not results:
+        # Fallback Python: ainda uma passagem por pattern (sem scanner.exe)
+        print(f"  AOB scan via {use}...")
+        for label, sig, field, instr_size in needed:
+            hit = _aob_scan_python(pm, sig)
+            if hit:
+                resolved = resolve_rip(pm, hit, field, instr_size)
+                if resolved:
+                    results[label] = resolved - base
+    else:
+        print(f"  AOB scan via {use}")
+
+    for label, rva in results.items():
+        if rva:
+            save_rva(label, rva)
+
+    return results
+
+
 def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label="",
                     offsets_key=None):
     """Tenta base+rva primeiro; se falhar, faz AOB scan e salva o novo RVA."""
@@ -193,20 +258,16 @@ def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label
         print(f"  {label}: base + 0x{rva:X}  →  0x{static_addr:X}  →  ptr=0x{ptr:X}  [RVA ok]")
         return static_addr, ptr
 
-    print(f"  {label}: RVA 0x{rva:X} inválido — tentando AOB scan...", end=" ", flush=True)
-    hit = aob_scan(pm, aob_sig)
-    if hit is None:
-        print("não encontrado.")
+    print(f"  {label}: RVA 0x{rva:X} inválido — iniciando AOB scan...", flush=True)
+    results = aob_scan_all(pm, base, [(label, aob_sig, aob_field, aob_instr_size)])
+    new_rva = results.get(label)
+    if not new_rva:
+        print(f"  {label}: não encontrado.")
         return None, None
-    resolved = resolve_rip(pm, hit, aob_field, aob_instr_size)
-    if resolved is None:
-        print("resolve_rip falhou.")
-        return None, None
-    new_rva = resolved - base
+
+    resolved = base + new_rva
     ptr = rptr(pm, resolved)
-    print(f"encontrado  new_rva=0x{new_rva:X}  ptr=0x{ptr:X}")
-    if offsets_key:
-        save_rva(offsets_key, new_rva)
+    print(f"  {label}: new_rva=0x{new_rva:X}  ptr=0x{ptr:X}")
     return resolved, ptr
 
 
@@ -355,10 +416,29 @@ def main():
 
     base = pm.base_address
 
+    # Pré-scan: se algum RVA estiver inválido, escaneia ambos de uma vez
+    # (uma única passagem pela memória para todos os padrões necessários)
+    tp_rva = args.tribepanel_rva
+    pf_rva = args.pathfinding_rva
+
+    missing = []
+    if rptr(pm, base + tp_rva) is None:
+        missing.append(("tribePanelInven",   AOB_TRIBEPANEL,   3, 7))
+    if args.all_players and rptr(pm, base + pf_rva) is None:
+        missing.append(("pathfindingSystem", AOB_PATHFINDING,  3, 7))
+
+    if missing:
+        labels = [m[0] for m in missing]
+        print(f"\nRVAs inválidos para: {', '.join(labels)}")
+        print(f"Iniciando AOB scan {'via scanner.exe (C++)' if SCANNER_EXE.exists() else 'Python puro'}...")
+        found = aob_scan_all(pm, base, missing)
+        if "tribePanelInven"   in found: tp_rva = found["tribePanelInven"]
+        if "pathfindingSystem" in found: pf_rva = found["pathfindingSystem"]
+
     def run_once():
-        chain_local_player(pm, base, args.tribepanel_rva)
+        chain_local_player(pm, base, tp_rva)
         if args.all_players:
-            chain_all_players(pm, base, args.pathfinding_rva)
+            chain_all_players(pm, base, pf_rva)
 
     if args.loop > 0:
         while True:
