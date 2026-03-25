@@ -282,22 +282,27 @@ def find_static_ptr(pm, base, rva, aob_sig, aob_field=3, aob_instr_size=7, label
 # ---------------------------------------------------------------------------
 
 def probe_localplayer_offset(pm, tribe_ptr,
-                              off_start=0x100, off_end=0x600, step=8):
+                              off_start=0x100, off_end=0x600, step=8,
+                              food_hint=None, tol=5.0):
     """
-    Varre offsets alinhados em 8 bytes dentro de tribe_ptr procurando um
-    ponteiro que pareça um Player* válido:
-      candidate = *(tribe_ptr + off)   → ponteiro válido
-      p_res     = *(candidate + 0x70)  → ponteiro válido (Resources*)
-      food      =  *(p_res + 0x00)     → float 0..100000
-      wood      =  *(p_res + 0x04)     → float 0..100000
-    Retorna (offset, player_ptr) ou (None, None).
+    Varre offsets dentro de tribe_ptr procurando Player* válido.
+
+    Critérios obrigatórios:
+      - candidate = *(tribe_ptr+off) é ponteiro válido
+      - *(candidate+0x70) é ponteiro válido (Resources*)
+      - food, wood, stone, gold estão em [0, 100000]
+      - age float está em {0.0, 1.0, 2.0, 3.0}
+
+    Se food_hint fornecido, exige |food - food_hint| <= tol.
+    Imprime todos os candidatos e retorna o melhor (ou o único).
     """
-    def sane_resource(v):
-        return v is not None and 0.0 <= v <= 100000.0
+    def sane(v):
+        return v is not None and 0.0 <= v <= 100_000.0
 
     print(f"  Sondando offsets 0x{off_start:X}..0x{off_end:X} em TribePanelInven "
           f"procurando Player*...", flush=True)
 
+    candidates = []
     for off in range(off_start, off_end, step):
         candidate = rptr(pm, tribe_ptr + off)
         if candidate is None:
@@ -305,14 +310,42 @@ def probe_localplayer_offset(pm, tribe_ptr,
         p_res = rptr(pm, candidate + OFF_PLAYER_RESOURCES)
         if p_res is None:
             continue
-        food = rfloat(pm, p_res + OFF_RES_FOOD)
-        wood = rfloat(pm, p_res + OFF_RES_WOOD)
-        if sane_resource(food) and sane_resource(wood):
-            print(f"  Encontrado: TribePanelInven + 0x{off:X} → Player*=0x{candidate:X} "
-                  f"(food={food:.0f} wood={wood:.0f})")
-            return off, candidate
+        food  = rfloat(pm, p_res + OFF_RES_FOOD)
+        wood  = rfloat(pm, p_res + OFF_RES_WOOD)
+        stone = rfloat(pm, p_res + OFF_RES_STONE)
+        gold  = rfloat(pm, p_res + OFF_RES_GOLD)
+        age   = rfloat(pm, p_res + OFF_RES_AGE)
 
-    return None, None
+        if not (sane(food) and sane(wood) and sane(stone) and sane(gold)):
+            continue
+        if age is None or round(age) not in (0, 1, 2, 3):
+            continue
+        if food_hint is not None and abs(food - food_hint) > tol:
+            continue
+
+        candidates.append((off, candidate, food, wood, stone, gold, age))
+        print(f"  Candidato +0x{off:X} → 0x{candidate:X}  "
+              f"food={food:.0f} wood={wood:.0f} stone={stone:.0f} "
+              f"gold={gold:.0f} age={int(round(age))}")
+
+    if not candidates:
+        if food_hint is not None:
+            print(f"  Nenhum candidato com food≈{food_hint:.0f}. "
+                  f"Rode sem --food-hint para ver todos.")
+        else:
+            print("  Nenhum candidato encontrado.")
+        return None, None
+
+    if len(candidates) == 1:
+        off, ptr, *_ = candidates[0]
+        return off, ptr
+
+    # Mais de um candidato — prefere o que tiver food > 10 (mais provável ser real)
+    best = max(candidates, key=lambda c: c[2])
+    off, ptr, food, *_ = best
+    print(f"  → Múltiplos candidatos: usando +0x{off:X} (food={food:.0f}). "
+          f"Use --food-hint=<valor> para forçar outro.")
+    return off, ptr
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +384,7 @@ def print_resources(label, d):
 # Cadeia A: tribePanelInven → jogador local
 # ---------------------------------------------------------------------------
 
-def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None):
+def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None, food_hint=None):
     print("\n[Cadeia A] tribePanelInven → jogador local")
     static_addr, tribe_ptr = find_static_ptr(
         pm, base, tribepanel_rva, AOB_TRIBEPANEL,
@@ -372,7 +405,8 @@ def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None):
 
         # Fallback: sonda força bruta
         if not new_off:
-            new_off, p_player = probe_localplayer_offset(pm, tribe_ptr)
+            new_off, p_player = probe_localplayer_offset(pm, tribe_ptr,
+                                                          food_hint=food_hint)
             if new_off is None:
                 print("  Offset do jogador local não encontrado.")
                 return None
@@ -473,6 +507,8 @@ def main():
                     help=f"RVA do pathfindingSystem (padrão: 0x{saved_pf:X})")
     ap.add_argument("--loop", type=float, default=0,
                     help="Repete a leitura a cada N segundos (0 = uma vez)")
+    ap.add_argument("--food-hint", type=float, default=None,
+                    help="Valor de food atual (visível no jogo) para filtrar candidatos")
     args = ap.parse_args()
 
     try:
@@ -504,7 +540,8 @@ def main():
         if "pathfindingSystem" in found: pf_rva = found["pathfindingSystem"]
 
     def run_once():
-        chain_local_player(pm, base, tp_rva, localplayer_off=saved_lp)
+        chain_local_player(pm, base, tp_rva, localplayer_off=saved_lp,
+                           food_hint=args.food_hint)
         if args.all_players:
             chain_all_players(pm, base, pf_rva)
 
