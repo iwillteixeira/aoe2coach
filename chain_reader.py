@@ -462,6 +462,43 @@ def print_resources(label, d):
 # Cadeia A: tribePanelInven → jogador local
 # ---------------------------------------------------------------------------
 
+def _probe_resources_offset(pm, p_player, food_hint=None, tol=5.0):
+    """Testa offsets 0x40..0x200 (step 8) dentro de Player* procurando Resources*."""
+    def sane(v):
+        return v is not None and v == v and 0.0 <= v <= 100_000.0
+
+    for res_off in range(0x40, 0x200, 8):
+        p_res = rptr(pm, p_player + res_off)
+        if p_res is None:
+            continue
+        food  = rfloat(pm, p_res + OFF_RES_FOOD)
+        wood  = rfloat(pm, p_res + OFF_RES_WOOD)
+        stone = rfloat(pm, p_res + OFF_RES_STONE)
+        gold  = rfloat(pm, p_res + OFF_RES_GOLD)
+        age   = rfloat(pm, p_res + OFF_RES_AGE)
+        if not (sane(food) and sane(wood) and sane(stone) and sane(gold)):
+            continue
+        try:
+            if age is None or round(age) not in (0, 1, 2, 3):
+                continue
+        except (ValueError, OverflowError):
+            continue
+        if food_hint is not None and abs(food - food_hint) > tol:
+            continue
+        print(f"  *** Novo offset encontrado: Player+0x{res_off:X}  "
+              f"food={food:.0f} wood={wood:.0f} stone={stone:.0f} gold={gold:.0f} ***")
+        save_rva("Player_Resources", res_off, section="struct_offsets")
+        global OFF_PLAYER_RESOURCES
+        OFF_PLAYER_RESOURCES = res_off
+        d = {"food": food, "wood": wood, "stone": stone, "gold": gold,
+             "age": AGE_NAMES.get(int(round(age)), "?"),
+             "pop": rfloat(pm, p_res + OFF_RES_POP),
+             "_resources_ptr": p_res}
+        return d
+    print("  Nenhum offset de Resources* encontrado.")
+    return None
+
+
 def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None, food_hint=None):
     print("\n[Cadeia A] tribePanelInven → jogador local")
     static_addr, tribe_ptr = find_static_ptr(
@@ -513,6 +550,9 @@ def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None, food_hint
 
     print(f"  Player* (local) = 0x{p_player:X}")
     res = read_resources(pm, p_player)
+    if res is None:
+        print("  Resources* inválido no offset padrão — sondando offsets 0x40..0x200...")
+        res = _probe_resources_offset(pm, p_player, food_hint)
     print_resources("Recursos (jogador local)", res)
     return res
 
