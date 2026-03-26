@@ -613,6 +613,10 @@ def main():
                     help="Valor de gold atual para filtrar candidatos no --direct-scan")
     ap.add_argument("--direct-scan", action="store_true",
                     help="Escaneia memória diretamente pelo valor de --food-hint (requer --food-hint)")
+    ap.add_argument("--dump-addr", type=lambda x: int(x, 16), default=None,
+                    help="Dumpa floats em ±128 bytes ao redor de um endereço (hex)")
+    ap.add_argument("--dump-range", type=int, default=128,
+                    help="Raio em bytes para --dump-addr (padrão: 128)")
     args = ap.parse_args()
 
     try:
@@ -644,6 +648,27 @@ def main():
         if "pathfindingSystem" in found: pf_rva = found["pathfindingSystem"]
 
     def run_once():
+        if args.dump_addr is not None:
+            r = args.dump_range
+            start = max(0, args.dump_addr - r)
+            size  = r * 2
+            try:
+                data = pm.read_bytes(start, size)
+            except Exception as e:
+                print(f"Erro ao ler 0x{start:X}: {e}")
+                return
+            print(f"Floats em 0x{args.dump_addr:X} ± {r} bytes:")
+            print(f"  {'offset':>6}  {'addr':>16}  {'float32':>12}  {'int32':>12}")
+            for i in range(0, len(data) - 3, 4):
+                f = struct.unpack_from("<f", data, i)[0]
+                iv = struct.unpack_from("<i", data, i)[0]
+                addr_i = start + i
+                rel = addr_i - args.dump_addr
+                marker = " <<<<" if rel == 0 else ""
+                if f == f and -1e7 < f < 1e7:  # ignora NaN e inf
+                    print(f"  {rel:+7d}  0x{addr_i:016X}  {f:12.2f}  {iv:12d}{marker}")
+            return
+
         if args.direct_scan:
             if args.food_hint is None:
                 print("--direct-scan requer --food-hint=<valor>")
