@@ -525,37 +525,33 @@ def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None, food_hint
 
     if _needs_rescan(p_player, food_hint):
         if p_player is None:
-            reason = "ponteiro inválido"
-        else:
-            _fv = rfloat(pm, rptr(pm, p_player + OFF_PLAYER_RESOURCES) or 0)
-            _fs = f"{_fv:.0f}" if _fv is not None else "?"
-            reason = f"food={_fs} ≠ hint {food_hint:.0f}"
-        print(f"  TribePanelInven + 0x{off:X}: {reason} — re-escaneando offset...")
-
-        results = aob_scan_all(pm, base,
-            [("TribePanelInven_localPlayer", AOB_LOCALPLAYER_OFF, 3, 4, "bytes")])
-        new_off = results.get("TribePanelInven_localPlayer")
-
-        if not new_off:
-            new_off, p_player = probe_localplayer_offset(pm, tribe_ptr,
-                                                          food_hint=food_hint)
-            if new_off is None:
-                print("  Offset do jogador local não encontrado.")
+            # Player* inválido — re-escaneia offset de Player dentro de TribePanelInven
+            print(f"  TribePanelInven + 0x{off:X}: ponteiro inválido — re-escaneando offset...")
+            results = aob_scan_all(pm, base,
+                [("TribePanelInven_localPlayer", AOB_LOCALPLAYER_OFF, 3, 4, "bytes")])
+            new_off = results.get("TribePanelInven_localPlayer")
+            if not new_off:
+                new_off, p_player = probe_localplayer_offset(pm, tribe_ptr,
+                                                              food_hint=food_hint)
+                if new_off is None:
+                    print("  Offset do jogador local não encontrado.")
+                    return None
+            else:
+                p_player = rptr(pm, tribe_ptr + new_off)
+            if p_player is None:
+                print(f"  TribePanelInven + 0x{new_off:X}: ponteiro inválido.")
                 return None
-        else:
-            p_player = rptr(pm, tribe_ptr + new_off)
-
-        if p_player is None:
-            print(f"  TribePanelInven + 0x{new_off:X}: ponteiro inválido.")
-            return None
-
-        save_rva("TribePanelInven_localPlayer", new_off, section="struct_offsets")
-        off = new_off
+            save_rva("TribePanelInven_localPlayer", new_off, section="struct_offsets")
+            off = new_off
+        # Player* existe mas Resources falhou ou food não bate — probe Resources* direto
 
     print(f"  Player* (local) = 0x{p_player:X}")
     res = read_resources(pm, p_player)
-    if res is None:
-        print("  Resources* inválido no offset padrão — sondando offsets 0x40..0x200...")
+    if res is None or (food_hint is not None and abs(res["food"] - food_hint) > 5.0):
+        if res is not None:
+            print(f"  food={res['food']:.0f} ≠ hint {food_hint:.0f} — sondando offset de Resources*...")
+        else:
+            print("  Resources* inválido — sondando offsets 0x40..0x200...")
         res = _probe_resources_offset(pm, p_player, food_hint)
     print_resources("Recursos (jogador local)", res)
     return res
