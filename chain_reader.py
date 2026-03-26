@@ -524,8 +524,12 @@ def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None, food_hint
     p_player = rptr(pm, tribe_ptr + off)
 
     if _needs_rescan(p_player, food_hint):
-        reason = "ponteiro inválido" if p_player is None else \
-                 f"food={rfloat(pm, rptr(pm, p_player+OFF_PLAYER_RESOURCES) or 0) or '?':.0f} ≠ hint {food_hint:.0f}"
+        if p_player is None:
+            reason = "ponteiro inválido"
+        else:
+            _fv = rfloat(pm, rptr(pm, p_player + OFF_PLAYER_RESOURCES) or 0)
+            _fs = f"{_fv:.0f}" if _fv is not None else "?"
+            reason = f"food={_fs} ≠ hint {food_hint:.0f}"
         print(f"  TribePanelInven + 0x{off:X}: {reason} — re-escaneando offset...")
 
         results = aob_scan_all(pm, base,
