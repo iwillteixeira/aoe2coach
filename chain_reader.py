@@ -675,6 +675,8 @@ def main():
                     help="Valor de stone atual para filtrar candidatos no --direct-scan")
     ap.add_argument("--gold-hint", type=float, default=None,
                     help="Valor de gold atual para filtrar candidatos no --direct-scan")
+    ap.add_argument("--localplayer-off", type=lambda x: int(x, 16), default=None,
+                    help="Override do offset TribePanelInven→Player* (hex, ex: 0x208)")
     ap.add_argument("--direct-scan", action="store_true",
                     help="Escaneia memória diretamente pelo valor de --food-hint (requer --food-hint)")
     ap.add_argument("--dump-addr", type=lambda x: int(x, 16), default=None,
@@ -760,7 +762,8 @@ def main():
                 print(f"    ... (+{len(hits)-20} mais)")
             return
 
-        chain_local_player(pm, base, tp_rva, localplayer_off=saved_lp,
+        lp_off = args.localplayer_off if args.localplayer_off is not None else saved_lp
+        chain_local_player(pm, base, tp_rva, localplayer_off=lp_off,
                            food_hint=args.food_hint)
         if args.all_players:
             chain_all_players(pm, base, pf_rva)
