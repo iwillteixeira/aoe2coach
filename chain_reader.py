@@ -605,6 +605,12 @@ def main():
                     help="Repete a leitura a cada N segundos (0 = uma vez)")
     ap.add_argument("--food-hint", type=float, default=None,
                     help="Valor de food atual (visível no jogo) para filtrar candidatos")
+    ap.add_argument("--wood-hint", type=float, default=None,
+                    help="Valor de wood atual para filtrar candidatos no --direct-scan")
+    ap.add_argument("--stone-hint", type=float, default=None,
+                    help="Valor de stone atual para filtrar candidatos no --direct-scan")
+    ap.add_argument("--gold-hint", type=float, default=None,
+                    help="Valor de gold atual para filtrar candidatos no --direct-scan")
     ap.add_argument("--direct-scan", action="store_true",
                     help="Escaneia memória diretamente pelo valor de --food-hint (requer --food-hint)")
     args = ap.parse_args()
@@ -645,6 +651,17 @@ def main():
             hits = direct_scan_resources(pm, args.food_hint)
             if not hits:
                 print("  Nenhum resultado encontrado.")
+                return
+            # Filtra por wood/stone/gold se fornecidos
+            tol = 5.0
+            if args.wood_hint is not None:
+                hits = [h for h in hits if abs(h[2] - args.wood_hint) <= tol]
+            if args.stone_hint is not None:
+                hits = [h for h in hits if abs(h[3] - args.stone_hint) <= tol]
+            if args.gold_hint is not None:
+                hits = [h for h in hits if abs(h[4] - args.gold_hint) <= tol]
+            if not hits:
+                print("  Nenhum resultado após filtros de wood/stone/gold.")
                 return
             print(f"  {len(hits)} resultado(s):")
             for addr, food, wood, stone, gold in hits[:20]:
