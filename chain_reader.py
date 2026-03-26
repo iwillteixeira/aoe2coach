@@ -462,41 +462,65 @@ def print_resources(label, d):
 # Cadeia A: tribePanelInven → jogador local
 # ---------------------------------------------------------------------------
 
-def _probe_resources_offset(pm, p_player, food_hint=None, tol=5.0):
-    """Testa offsets 0x40..0x200 (step 8) dentro de Player* procurando Resources*."""
+def _probe_resources_offset(pm, p_player, food_hint=None, tol=8.0):
+    """
+    Testa offsets 0x00..0x400 (step 4) dentro de Player* procurando Resources*.
+    Para cada ponteiro válido, testa offsets 0x00..0x80 (step 4) para food.
+    """
     def sane(v):
         return v is not None and v == v and 0.0 <= v <= 100_000.0
 
-    for res_off in range(0x40, 0x200, 8):
+    candidates = []
+    for res_off in range(0x00, 0x400, 4):
         p_res = rptr(pm, p_player + res_off)
         if p_res is None:
             continue
-        food  = rfloat(pm, p_res + OFF_RES_FOOD)
-        wood  = rfloat(pm, p_res + OFF_RES_WOOD)
-        stone = rfloat(pm, p_res + OFF_RES_STONE)
-        gold  = rfloat(pm, p_res + OFF_RES_GOLD)
-        age   = rfloat(pm, p_res + OFF_RES_AGE)
-        if not (sane(food) and sane(wood) and sane(stone) and sane(gold)):
-            continue
-        try:
-            if age is None or round(age) not in (0, 1, 2, 3):
+        # Testa múltiplos offsets de food dentro da struct apontada
+        for food_off in range(0x00, 0x80, 4):
+            food = rfloat(pm, p_res + food_off)
+            if not sane(food):
                 continue
-        except (ValueError, OverflowError):
-            continue
-        if food_hint is not None and abs(food - food_hint) > tol:
-            continue
-        print(f"  *** Novo offset encontrado: Player+0x{res_off:X}  "
-              f"food={food:.0f} wood={wood:.0f} stone={stone:.0f} gold={gold:.0f} ***")
-        save_rva("Player_Resources", res_off, section="struct_offsets")
-        global OFF_PLAYER_RESOURCES
-        OFF_PLAYER_RESOURCES = res_off
-        d = {"food": food, "wood": wood, "stone": stone, "gold": gold,
-             "age": AGE_NAMES.get(int(round(age)), "?"),
-             "pop": rfloat(pm, p_res + OFF_RES_POP),
-             "_resources_ptr": p_res}
-        return d
-    print("  Nenhum offset de Resources* encontrado.")
-    return None
+            if food_hint is not None and abs(food - food_hint) > tol:
+                continue
+            wood  = rfloat(pm, p_res + food_off + 0x04)
+            stone = rfloat(pm, p_res + food_off + 0x08)
+            gold  = rfloat(pm, p_res + food_off + 0x0C)
+            if not (sane(wood) and sane(stone) and sane(gold)):
+                continue
+            candidates.append((res_off, food_off, p_res, food, wood, stone, gold))
+
+    if not candidates:
+        print("  Nenhum offset de Resources* encontrado.")
+        return None
+
+    # Prefere o candidato com food mais próximo do hint
+    if food_hint is not None:
+        candidates.sort(key=lambda c: abs(c[3] - food_hint))
+
+    print(f"  {len(candidates)} candidato(s) encontrado(s):")
+    for res_off, food_off, p_res, food, wood, stone, gold in candidates[:5]:
+        print(f"    Player+0x{res_off:X}  ptr+0x{food_off:X}  "
+              f"food={food:.0f} wood={wood:.0f} stone={stone:.0f} gold={gold:.0f}  "
+              f"(Resources*=0x{p_res:X})")
+
+    best = candidates[0]
+    res_off, food_off, p_res, food, wood, stone, gold = best
+    print(f"  *** Usando: Player+0x{res_off:X}  food@ptr+0x{food_off:X} ***")
+    save_rva("Player_Resources", res_off, section="struct_offsets")
+    save_rva("Res_food_off", food_off, section="struct_offsets")
+    global OFF_PLAYER_RESOURCES, OFF_RES_FOOD, OFF_RES_WOOD, OFF_RES_STONE, OFF_RES_GOLD
+    OFF_PLAYER_RESOURCES = res_off
+    OFF_RES_FOOD  = food_off
+    OFF_RES_WOOD  = food_off + 0x04
+    OFF_RES_STONE = food_off + 0x08
+    OFF_RES_GOLD  = food_off + 0x0C
+    age = rfloat(pm, p_res + food_off + 0x18)
+    pop = rfloat(pm, p_res + food_off + 0x2C)
+    d = {"food": food, "wood": wood, "stone": stone, "gold": gold,
+         "age": AGE_NAMES.get(int(round(age)) if age is not None else -1, "?"),
+         "pop": pop,
+         "_resources_ptr": p_res}
+    return d
 
 
 def chain_local_player(pm, base, tribepanel_rva, localplayer_off=None, food_hint=None):
